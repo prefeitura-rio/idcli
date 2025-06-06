@@ -1,0 +1,10 @@
+oauth2:
+  issuer: "https://auth.example.com/auth/realms/example"
+  client_id: "example-client"
+  client_secret: "example-secret-123"
+  redirect_uri: "http://localhost:8000/callback"
+  scopes:
+    - "openid"
+    - "profile"
+    - "email"
+    - "roles" 
