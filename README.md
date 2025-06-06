@@ -4,6 +4,11 @@ A command-line interface for OAuth2 PKCE authentication with Keycloak.
 
 ## Installation
 
+### One-line Install
+```bash
+curl -sSL https://raw.githubusercontent.com/prefeitura-rio/idcli/main/install.sh | bash
+```
+
 ### From Source
 ```bash
 # Clone the repository
