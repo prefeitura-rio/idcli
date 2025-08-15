@@ -1,6 +1,6 @@
 # IDCLI
 
-A command-line interface for OAuth2 PKCE authentication with Keycloak.
+A command-line interface for OAuth2 authentication with Keycloak, supporting both PKCE and Client Credentials flows.
 
 ## Installation
 
@@ -59,6 +59,9 @@ The configuration file path must be specified in one of these ways:
 
 ## Usage
 
+### PKCE Flow (Default)
+Interactive flow that opens a browser for authentication:
+
 ```bash
 # Run with specific config file
 ./idcli --config /path/to/config.yaml
@@ -67,6 +70,16 @@ The configuration file path must be specified in one of these ways:
 export IDCLI_CONFIG_YAML_PATH=/path/to/config.yaml
 ./idcli
 ```
+
+### Client Credentials Flow
+Direct machine-to-machine authentication (requires client_secret in config):
+
+```bash
+# Use client credentials flow
+./idcli --config /path/to/config.yaml --client-credentials
+```
+
+This flow makes a direct API call without requiring browser interaction, perfect for automated scripts and server-to-server authentication.
 
 ## Development
 
