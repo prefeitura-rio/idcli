@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	version = "0.3.3"
+	version = "0.3.4"
 	repoURL = "https://github.com/prefeitura-rio/idcli"
 )
 
@@ -595,7 +595,22 @@ func main() {
 
 			// Replace the current binary
 			if err := os.Rename(tmpPath, execPath); err != nil {
-				return fmt.Errorf("replacing binary: %w", err)
+				// If permission denied, try using sudo
+				if os.IsPermission(err) {
+					fmt.Println("Permission denied. Attempting to upgrade with sudo...")
+
+					// Use sudo to move the file
+					cmd := exec.Command("sudo", "mv", tmpPath, execPath)
+					cmd.Stdout = os.Stdout
+					cmd.Stderr = os.Stderr
+					cmd.Stdin = os.Stdin
+
+					if err := cmd.Run(); err != nil {
+						return fmt.Errorf("failed to upgrade with sudo: %w", err)
+					}
+				} else {
+					return fmt.Errorf("replacing binary: %w", err)
+				}
 			}
 
 			fmt.Printf("✓ Successfully upgraded to v%s\n", latestVersion)
