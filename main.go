@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	version = "0.3.4"
+	version = "0.3.5"
 	repoURL = "https://github.com/prefeitura-rio/idcli"
 )
 
@@ -47,6 +47,11 @@ type TokenCache struct {
 	RefreshToken string `json:"refresh_token,omitempty"`
 	ExpiresAt    int64  `json:"expires_at,omitempty"`
 	TokenType    string `json:"token_type,omitempty"`
+}
+
+type OAuthError struct {
+	Error            string `json:"error"`
+	ErrorDescription string `json:"error_description"`
 }
 
 func generateCodeVerifier() (string, error) {
@@ -247,7 +252,7 @@ func performClientCredentialsFlow(config *Config) error {
 	resp, err := http.Post(tokenURL, "application/x-www-form-urlencoded",
 		strings.NewReader(strings.Join(formParts, "&")))
 	if err != nil {
-		return fmt.Errorf("requesting tokens: %w", err)
+		return fmt.Errorf("network error requesting tokens: %w\n\nHint: Check your internet connection and that the issuer URL is correct", err)
 	}
 	defer resp.Body.Close()
 
@@ -257,7 +262,7 @@ func performClientCredentialsFlow(config *Config) error {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("token request failed with status %d: %s", resp.StatusCode, string(body))
+		return parseOAuthError(body, resp.StatusCode)
 	}
 
 	// Parse and cache the token response
@@ -297,6 +302,34 @@ func getStringOrEmpty(m map[string]interface{}, key string) string {
 		return val
 	}
 	return ""
+}
+
+func parseOAuthError(body []byte, statusCode int) error {
+	var oauthErr OAuthError
+	if err := json.Unmarshal(body, &oauthErr); err == nil && oauthErr.Error != "" {
+		msg := fmt.Sprintf("OAuth error (%d): %s", statusCode, oauthErr.Error)
+		if oauthErr.ErrorDescription != "" {
+			msg += fmt.Sprintf(" - %s", oauthErr.ErrorDescription)
+		}
+
+		// Add helpful hints based on error type
+		switch oauthErr.Error {
+		case "invalid_client":
+			msg += "\n\nHint: Check that your client_id and client_secret are correct in the config file"
+		case "invalid_grant":
+			msg += "\n\nHint: The authorization code may have expired or already been used. Try authenticating again"
+		case "unauthorized_client":
+			msg += "\n\nHint: This client is not authorized for the requested grant type. Check your Keycloak client configuration"
+		case "access_denied":
+			msg += "\n\nHint: The user denied the authorization request"
+		case "invalid_scope":
+			msg += "\n\nHint: One or more requested scopes are invalid. Check the 'scopes' in your config file"
+		}
+
+		return fmt.Errorf(msg)
+	}
+
+	return fmt.Errorf("request failed with status %d: %s", statusCode, string(body))
 }
 
 func startCallbackServer(codeChan chan string) {
@@ -429,16 +462,20 @@ func main() {
 				formParts = append(formParts, fmt.Sprintf("%s=%s", k, v))
 			}
 
-			resp, err := http.Post(tokenURL, "application/x-www-form-urlencoded", 
+			resp, err := http.Post(tokenURL, "application/x-www-form-urlencoded",
 				strings.NewReader(strings.Join(formParts, "&")))
 			if err != nil {
-				return fmt.Errorf("exchanging code for tokens: %w", err)
+				return fmt.Errorf("network error exchanging code for tokens: %w\n\nHint: Check your internet connection and that the issuer URL is correct", err)
 			}
 			defer resp.Body.Close()
 
 			body, err := io.ReadAll(resp.Body)
 			if err != nil {
 				return fmt.Errorf("reading response: %w", err)
+			}
+
+			if resp.StatusCode != http.StatusOK {
+				return parseOAuthError(body, resp.StatusCode)
 			}
 
 			// Parse and cache the token response
