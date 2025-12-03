@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -52,6 +54,27 @@ func loadConfig(path string) (*Config, error) {
 	}
 
 	return &config, nil
+}
+
+func openBrowser(url string) error {
+	var cmd string
+	var args []string
+
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = "open"
+		args = []string{url}
+	case "linux":
+		cmd = "xdg-open"
+		args = []string{url}
+	case "windows":
+		cmd = "cmd"
+		args = []string{"/c", "start", url}
+	default:
+		return fmt.Errorf("unsupported platform")
+	}
+
+	return exec.Command(cmd, args...).Start()
 }
 
 func performClientCredentialsFlow(config *Config) error {
@@ -170,7 +193,11 @@ func main() {
 			}
 			authURL = fmt.Sprintf("%s?%s", authURL, strings.Join(queryParts, "&"))
 
-			fmt.Printf("Please visit this URL to authenticate:\n%s\n", authURL)
+			fmt.Println("Opening browser for authentication...")
+			if err := openBrowser(authURL); err != nil {
+				fmt.Printf("Failed to open browser automatically: %v\n", err)
+				fmt.Printf("Please visit this URL manually:\n%s\n", authURL)
+			}
 
 			// Wait for the authorization code
 			code := <-codeChan
