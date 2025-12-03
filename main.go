@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	version = "0.3.0"
+	version = "0.3.1"
 	repoURL = "https://github.com/prefeitura-rio/idcli"
 )
 
@@ -240,10 +240,10 @@ func main() {
 			}
 			authURL = fmt.Sprintf("%s?%s", authURL, strings.Join(queryParts, "&"))
 
-			fmt.Println("Opening browser for authentication...")
+			fmt.Printf("Opening browser for authentication...\n%s\n", authURL)
 			if err := openBrowser(authURL); err != nil {
 				fmt.Printf("Failed to open browser automatically: %v\n", err)
-				fmt.Printf("Please visit this URL manually:\n%s\n", authURL)
+				fmt.Println("Please visit the URL above manually.")
 			}
 
 			// Wait for the authorization code
