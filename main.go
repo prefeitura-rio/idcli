@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	version = "0.3.2"
+	version = "0.3.3"
 	repoURL = "https://github.com/prefeitura-rio/idcli"
 )
 
@@ -40,6 +40,13 @@ type Config struct {
 
 type GitHubRelease struct {
 	TagName string `json:"tag_name"`
+}
+
+type TokenCache struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token,omitempty"`
+	ExpiresAt    int64  `json:"expires_at,omitempty"`
+	TokenType    string `json:"token_type,omitempty"`
 }
 
 func generateCodeVerifier() (string, error) {
@@ -170,6 +177,59 @@ func extractFromZip(archiveData []byte, filename string) ([]byte, error) {
 	return nil, fmt.Errorf("file %s not found in archive", filename)
 }
 
+func getTokenCachePath() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	cacheDir := filepath.Join(homeDir, ".idcli")
+	if err := os.MkdirAll(cacheDir, 0700); err != nil {
+		return "", err
+	}
+	return filepath.Join(cacheDir, "token.json"), nil
+}
+
+func saveTokenCache(token *TokenCache) error {
+	cachePath, err := getTokenCachePath()
+	if err != nil {
+		return err
+	}
+
+	data, err := json.MarshalIndent(token, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(cachePath, data, 0600)
+}
+
+func loadTokenCache() (*TokenCache, error) {
+	cachePath, err := getTokenCachePath()
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := os.ReadFile(cachePath)
+	if err != nil {
+		return nil, err
+	}
+
+	var token TokenCache
+	if err := json.Unmarshal(data, &token); err != nil {
+		return nil, err
+	}
+
+	return &token, nil
+}
+
+func clearTokenCache() error {
+	cachePath, err := getTokenCachePath()
+	if err != nil {
+		return err
+	}
+	return os.Remove(cachePath)
+}
+
 func performClientCredentialsFlow(config *Config) error {
 	tokenURL := fmt.Sprintf("%s/protocol/openid-connect/token", config.OAuth2.Issuer)
 	data := map[string]string{
@@ -200,6 +260,28 @@ func performClientCredentialsFlow(config *Config) error {
 		return fmt.Errorf("token request failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
+	// Parse and cache the token response
+	var tokenResponse map[string]interface{}
+	if err := json.Unmarshal(body, &tokenResponse); err != nil {
+		return fmt.Errorf("parsing token response: %w", err)
+	}
+
+	// Save to cache
+	cache := &TokenCache{
+		AccessToken: tokenResponse["access_token"].(string),
+		TokenType:   getStringOrEmpty(tokenResponse, "token_type"),
+	}
+	if refreshToken, ok := tokenResponse["refresh_token"].(string); ok {
+		cache.RefreshToken = refreshToken
+	}
+	if expiresIn, ok := tokenResponse["expires_in"].(float64); ok {
+		cache.ExpiresAt = time.Now().Unix() + int64(expiresIn)
+	}
+
+	if err := saveTokenCache(cache); err != nil {
+		fmt.Printf("Warning: failed to cache token: %v\n", err)
+	}
+
 	// Pretty print the tokens
 	var prettyJSON bytes.Buffer
 	if err := json.Indent(&prettyJSON, body, "", "  "); err != nil {
@@ -208,6 +290,13 @@ func performClientCredentialsFlow(config *Config) error {
 	fmt.Printf("\nReceived tokens:\n%s\n", prettyJSON.String())
 
 	return nil
+}
+
+func getStringOrEmpty(m map[string]interface{}, key string) string {
+	if val, ok := m[key].(string); ok {
+		return val
+	}
+	return ""
 }
 
 func startCallbackServer(codeChan chan string) {
@@ -231,6 +320,7 @@ func startCallbackServer(codeChan chan string) {
 func main() {
 	var configPath string
 	var useClientCredentials bool
+	var refreshToken bool
 
 	rootCmd := &cobra.Command{
 		Use:   "idcli",
@@ -259,6 +349,27 @@ func main() {
 					return fmt.Errorf("client_secret is required for client credentials flow")
 				}
 				return performClientCredentialsFlow(config)
+			}
+
+			// Check for cached token unless --refresh is set
+			if !refreshToken {
+				if cachedToken, err := loadTokenCache(); err == nil {
+					// Check if token is expired
+					if cachedToken.ExpiresAt == 0 || cachedToken.ExpiresAt > time.Now().Unix() {
+						fmt.Println("Using cached token")
+						fmt.Printf("Access Token: %s\n", cachedToken.AccessToken)
+						if cachedToken.RefreshToken != "" {
+							fmt.Printf("Refresh Token: %s\n", cachedToken.RefreshToken)
+						}
+						if cachedToken.ExpiresAt > 0 {
+							expiresIn := cachedToken.ExpiresAt - time.Now().Unix()
+							fmt.Printf("Expires in: %d seconds\n", expiresIn)
+						}
+						fmt.Println("\nUse --refresh to force re-authentication")
+						return nil
+					}
+					fmt.Println("Cached token expired, re-authenticating...")
+				}
 			}
 
 			// Generate PKCE values
@@ -330,6 +441,28 @@ func main() {
 				return fmt.Errorf("reading response: %w", err)
 			}
 
+			// Parse and cache the token response
+			var tokenResponse map[string]interface{}
+			if err := json.Unmarshal(body, &tokenResponse); err != nil {
+				return fmt.Errorf("parsing token response: %w", err)
+			}
+
+			// Save to cache
+			cache := &TokenCache{
+				AccessToken: tokenResponse["access_token"].(string),
+				TokenType:   getStringOrEmpty(tokenResponse, "token_type"),
+			}
+			if refreshToken, ok := tokenResponse["refresh_token"].(string); ok {
+				cache.RefreshToken = refreshToken
+			}
+			if expiresIn, ok := tokenResponse["expires_in"].(float64); ok {
+				cache.ExpiresAt = time.Now().Unix() + int64(expiresIn)
+			}
+
+			if err := saveTokenCache(cache); err != nil {
+				fmt.Printf("Warning: failed to cache token: %v\n", err)
+			}
+
 			// Pretty print the tokens
 			var prettyJSON bytes.Buffer
 			if err := json.Indent(&prettyJSON, body, "", "  "); err != nil {
@@ -343,6 +476,7 @@ func main() {
 
 	rootCmd.Flags().StringVarP(&configPath, "config", "c", "", "path to config file")
 	rootCmd.Flags().BoolVar(&useClientCredentials, "client-credentials", false, "use client credentials flow instead of PKCE")
+	rootCmd.Flags().BoolVar(&refreshToken, "refresh", false, "force re-authentication even if token is cached")
 
 	versionCmd := &cobra.Command{
 		Use:   "version",
