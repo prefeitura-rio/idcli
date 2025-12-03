@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	version = "0.3.6"
+	version = "0.3.7"
 	repoURL = "https://github.com/prefeitura-rio/idcli"
 )
 
@@ -520,6 +520,21 @@ func main() {
 		Short: "Print version information",
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Printf("idcli version %s\n", version)
+
+			// Check for latest version
+			latestVersion, err := checkLatestVersion()
+			if err != nil {
+				// Silently fail - don't bother the user with network errors
+				return
+			}
+
+			currentVersion := strings.TrimPrefix(version, "v")
+			if latestVersion == currentVersion {
+				fmt.Println("✓ You're on the latest version")
+			} else if latestVersion > currentVersion {
+				fmt.Printf("⚠️  Update available: v%s → v%s\n", currentVersion, latestVersion)
+				fmt.Println("Run 'idcli upgrade' to update")
+			}
 		},
 	}
 
