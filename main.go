@@ -1,7 +1,10 @@
 package main
 
 import (
+	"archive/tar"
+	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -11,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -20,7 +24,7 @@ import (
 )
 
 const (
-	version = "0.3.1"
+	version = "0.3.2"
 	repoURL = "https://github.com/prefeitura-rio/idcli"
 )
 
@@ -119,6 +123,51 @@ func checkForUpdates() {
 		fmt.Printf("\n⚠️  A new version is available: v%s (current: v%s)\n", latestVersion, currentVersion)
 		fmt.Printf("Run 'idcli upgrade' to update\n\n")
 	}
+}
+
+func extractFromTarGz(archiveData []byte, filename string) ([]byte, error) {
+	gzr, err := gzip.NewReader(bytes.NewReader(archiveData))
+	if err != nil {
+		return nil, err
+	}
+	defer gzr.Close()
+
+	tr := tar.NewReader(gzr)
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		if filepath.Base(header.Name) == filename {
+			return io.ReadAll(tr)
+		}
+	}
+
+	return nil, fmt.Errorf("file %s not found in archive", filename)
+}
+
+func extractFromZip(archiveData []byte, filename string) ([]byte, error) {
+	zr, err := zip.NewReader(bytes.NewReader(archiveData), int64(len(archiveData)))
+	if err != nil {
+		return nil, err
+	}
+
+	for _, file := range zr.File {
+		if filepath.Base(file.Name) == filename {
+			rc, err := file.Open()
+			if err != nil {
+				return nil, err
+			}
+			defer rc.Close()
+			return io.ReadAll(rc)
+		}
+	}
+
+	return nil, fmt.Errorf("file %s not found in archive", filename)
 }
 
 func performClientCredentialsFlow(config *Config) error {
@@ -321,46 +370,67 @@ func main() {
 
 			fmt.Printf("Upgrading from v%s to v%s...\n", currentVersion, latestVersion)
 
-			// Determine binary name based on platform
-			var binaryName string
+			// Determine archive name based on platform (GoReleaser format)
+			var archiveName, archFormat string
+			var osName, archName string
+
 			switch runtime.GOOS {
 			case "darwin":
-				switch runtime.GOARCH {
-				case "amd64":
-					binaryName = "idcli-darwin-amd64"
-				case "arm64":
-					binaryName = "idcli-darwin-arm64"
-				default:
-					return fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
-				}
+				osName = "Darwin"
 			case "linux":
-				if runtime.GOARCH == "amd64" {
-					binaryName = "idcli-linux-amd64"
-				} else {
-					return fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
-				}
+				osName = "Linux"
 			case "windows":
-				if runtime.GOARCH == "amd64" {
-					binaryName = "idcli-windows-amd64.exe"
-				} else {
-					return fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
-				}
+				osName = "Windows"
 			default:
 				return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 			}
 
-			downloadURL := fmt.Sprintf("%s/releases/download/v%s/%s", repoURL, latestVersion, binaryName)
+			switch runtime.GOARCH {
+			case "amd64":
+				archName = "x86_64"
+			case "arm64":
+				archName = "arm64"
+			default:
+				return fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
+			}
+
+			// Windows uses zip, others use tar.gz
+			if runtime.GOOS == "windows" {
+				archFormat = "zip"
+			} else {
+				archFormat = "tar.gz"
+			}
+
+			archiveName = fmt.Sprintf("idcli_%s_%s.%s", osName, archName, archFormat)
+			downloadURL := fmt.Sprintf("%s/releases/download/v%s/%s", repoURL, latestVersion, archiveName)
 			fmt.Printf("Downloading from %s...\n", downloadURL)
 
-			// Download the new binary
+			// Download the archive
 			resp, err := http.Get(downloadURL)
 			if err != nil {
-				return fmt.Errorf("downloading binary: %w", err)
+				return fmt.Errorf("downloading archive: %w", err)
 			}
 			defer resp.Body.Close()
 
 			if resp.StatusCode != http.StatusOK {
 				return fmt.Errorf("download failed with status %d", resp.StatusCode)
+			}
+
+			// Read archive into memory
+			archiveData, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return fmt.Errorf("reading archive: %w", err)
+			}
+
+			// Extract binary from archive
+			var binaryData []byte
+			if archFormat == "zip" {
+				binaryData, err = extractFromZip(archiveData, "idcli.exe")
+			} else {
+				binaryData, err = extractFromTarGz(archiveData, "idcli")
+			}
+			if err != nil {
+				return fmt.Errorf("extracting binary: %w", err)
 			}
 
 			// Get the path of the current executable
@@ -377,8 +447,8 @@ func main() {
 			tmpPath := tmpFile.Name()
 			defer os.Remove(tmpPath)
 
-			// Write the downloaded binary to temp file
-			if _, err := io.Copy(tmpFile, resp.Body); err != nil {
+			// Write the binary to temp file
+			if _, err := tmpFile.Write(binaryData); err != nil {
 				tmpFile.Close()
 				return fmt.Errorf("writing binary: %w", err)
 			}
