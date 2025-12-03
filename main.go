@@ -24,9 +24,34 @@ import (
 )
 
 const (
-	version = "0.3.7"
+	version = "0.4.0"
 	repoURL = "https://github.com/prefeitura-rio/idcli"
 )
+
+// ANSI color codes
+const (
+	colorReset  = "\033[0m"
+	colorGreen  = "\033[32m"
+	colorYellow = "\033[33m"
+	colorCyan   = "\033[36m"
+	colorGray   = "\033[90m"
+)
+
+func colorize(color, text string) string {
+	return color + text + colorReset
+}
+
+func success(text string) string {
+	return colorize(colorGreen, "✓ "+text)
+}
+
+func warning(text string) string {
+	return colorize(colorYellow, "⚠️  "+text)
+}
+
+func info(text string) string {
+	return colorize(colorCyan, text)
+}
 
 type Config struct {
 	OAuth2 struct {
@@ -235,7 +260,7 @@ func clearTokenCache() error {
 	return os.Remove(cachePath)
 }
 
-func performClientCredentialsFlow(config *Config) error {
+func performClientCredentialsFlow(config *Config, quietMode bool) error {
 	tokenURL := fmt.Sprintf("%s/protocol/openid-connect/token", config.OAuth2.Issuer)
 	data := map[string]string{
 		"grant_type":    "client_credentials",
@@ -283,16 +308,22 @@ func performClientCredentialsFlow(config *Config) error {
 		cache.ExpiresAt = time.Now().Unix() + int64(expiresIn)
 	}
 
-	if err := saveTokenCache(cache); err != nil {
+	if err := saveTokenCache(cache); err != nil && !quietMode {
 		fmt.Printf("Warning: failed to cache token: %v\n", err)
 	}
 
-	// Pretty print the tokens
-	var prettyJSON bytes.Buffer
-	if err := json.Indent(&prettyJSON, body, "", "  "); err != nil {
-		return fmt.Errorf("formatting JSON: %w", err)
+	// Output tokens
+	if quietMode {
+		// JSON output for quiet mode
+		fmt.Println(string(body))
+	} else {
+		// Pretty print the tokens
+		var prettyJSON bytes.Buffer
+		if err := json.Indent(&prettyJSON, body, "", "  "); err != nil {
+			return fmt.Errorf("formatting JSON: %w", err)
+		}
+		fmt.Printf("\nReceived tokens:\n%s\n", prettyJSON.String())
 	}
-	fmt.Printf("\nReceived tokens:\n%s\n", prettyJSON.String())
 
 	return nil
 }
@@ -332,7 +363,7 @@ func parseOAuthError(body []byte, statusCode int) error {
 	return fmt.Errorf("request failed with status %d: %s", statusCode, string(body))
 }
 
-func startCallbackServer(codeChan chan string) {
+func startCallbackServer(codeChan chan string, port int) {
 	http.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		code := r.URL.Query().Get("code")
 		if code != "" {
@@ -344,7 +375,8 @@ func startCallbackServer(codeChan chan string) {
 	})
 
 	go func() {
-		if err := http.ListenAndServe(":8000", nil); err != nil {
+		addr := fmt.Sprintf(":%d", port)
+		if err := http.ListenAndServe(addr, nil); err != nil {
 			fmt.Printf("Error starting callback server: %v\n", err)
 		}
 	}()
@@ -354,13 +386,17 @@ func main() {
 	var configPath string
 	var useClientCredentials bool
 	var refreshToken bool
+	var quietMode bool
+	var redirectPort int
 
 	rootCmd := &cobra.Command{
 		Use:   "idcli",
 		Short: "OAuth2 CLI client with PKCE and Client Credentials flows",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Check for updates asynchronously (non-blocking)
-			go checkForUpdates()
+			// Check for updates asynchronously (non-blocking) unless quiet mode
+			if !quietMode {
+				go checkForUpdates()
+			}
 
 			// If config path not provided via flag, try environment variable
 			if configPath == "" {
@@ -381,7 +417,7 @@ func main() {
 				if config.OAuth2.ClientSecret == "" {
 					return fmt.Errorf("client_secret is required for client credentials flow")
 				}
-				return performClientCredentialsFlow(config)
+				return performClientCredentialsFlow(config, quietMode)
 			}
 
 			// Check for cached token unless --refresh is set
@@ -389,19 +425,37 @@ func main() {
 				if cachedToken, err := loadTokenCache(); err == nil {
 					// Check if token is expired
 					if cachedToken.ExpiresAt == 0 || cachedToken.ExpiresAt > time.Now().Unix() {
-						fmt.Println("Using cached token")
-						fmt.Printf("Access Token: %s\n", cachedToken.AccessToken)
-						if cachedToken.RefreshToken != "" {
-							fmt.Printf("Refresh Token: %s\n", cachedToken.RefreshToken)
+						if quietMode {
+							// JSON output for quiet mode
+							output := map[string]interface{}{
+								"access_token": cachedToken.AccessToken,
+								"token_type":   cachedToken.TokenType,
+							}
+							if cachedToken.RefreshToken != "" {
+								output["refresh_token"] = cachedToken.RefreshToken
+							}
+							if cachedToken.ExpiresAt > 0 {
+								output["expires_in"] = cachedToken.ExpiresAt - time.Now().Unix()
+							}
+							jsonOutput, _ := json.MarshalIndent(output, "", "  ")
+							fmt.Println(string(jsonOutput))
+						} else {
+							fmt.Println(success("Using cached token"))
+							fmt.Printf("Access Token: %s\n", cachedToken.AccessToken)
+							if cachedToken.RefreshToken != "" {
+								fmt.Printf("Refresh Token: %s\n", cachedToken.RefreshToken)
+							}
+							if cachedToken.ExpiresAt > 0 {
+								expiresIn := cachedToken.ExpiresAt - time.Now().Unix()
+								fmt.Printf("Expires in: %s\n", info(fmt.Sprintf("%d seconds", expiresIn)))
+							}
+							fmt.Printf("\n%s\n", colorize(colorGray, "Use --refresh to force re-authentication"))
 						}
-						if cachedToken.ExpiresAt > 0 {
-							expiresIn := cachedToken.ExpiresAt - time.Now().Unix()
-							fmt.Printf("Expires in: %d seconds\n", expiresIn)
-						}
-						fmt.Println("\nUse --refresh to force re-authentication")
 						return nil
 					}
-					fmt.Println("Cached token expired, re-authenticating...")
+					if !quietMode {
+						fmt.Println("Cached token expired, re-authenticating...")
+					}
 				}
 			}
 
@@ -412,9 +466,21 @@ func main() {
 			}
 			codeChallenge := generateCodeChallenge(codeVerifier)
 
+			// Use custom port if specified, otherwise default to 8000
+			if redirectPort == 0 {
+				redirectPort = 8000
+			}
+
 			// Start callback server
 			codeChan := make(chan string)
-			startCallbackServer(codeChan)
+			startCallbackServer(codeChan, redirectPort)
+
+			// Build redirect URI with custom port
+			actualRedirectURI := config.OAuth2.RedirectURI
+			if redirectPort != 8000 {
+				// Replace port in redirect URI
+				actualRedirectURI = fmt.Sprintf("http://localhost:%d/callback", redirectPort)
+			}
 
 			// Build authorization URL
 			authURL := fmt.Sprintf("%s/protocol/openid-connect/auth", config.OAuth2.Issuer)
@@ -422,7 +488,7 @@ func main() {
 				"client_id":             config.OAuth2.ClientID,
 				"response_type":         "code",
 				"scope":                 strings.Join(config.OAuth2.Scopes, "+"),
-				"redirect_uri":          config.OAuth2.RedirectURI,
+				"redirect_uri":          actualRedirectURI,
 				"code_challenge":        codeChallenge,
 				"code_challenge_method": "S256",
 			}
@@ -433,14 +499,22 @@ func main() {
 			}
 			authURL = fmt.Sprintf("%s?%s", authURL, strings.Join(queryParts, "&"))
 
-			fmt.Printf("Opening browser for authentication...\n%s\n", authURL)
-			if err := openBrowser(authURL); err != nil {
+			if !quietMode {
+				fmt.Printf("%s\n%s\n", info("Opening browser for authentication..."), colorize(colorGray, authURL))
+			}
+			if err := openBrowser(authURL); err != nil && !quietMode {
 				fmt.Printf("Failed to open browser automatically: %v\n", err)
 				fmt.Println("Please visit the URL above manually.")
 			}
 
-			// Wait for the authorization code
-			code := <-codeChan
+			// Wait for the authorization code with timeout (5 minutes)
+			var code string
+			select {
+			case code = <-codeChan:
+				// Got the code
+			case <-time.After(5 * time.Minute):
+				return fmt.Errorf("authentication timeout: no response received after 5 minutes\n\nThe authentication flow was not completed in time. Please try again.")
+			}
 
 			// Exchange code for tokens
 			tokenURL := fmt.Sprintf("%s/protocol/openid-connect/token", config.OAuth2.Issuer)
@@ -448,7 +522,7 @@ func main() {
 				"grant_type":    "authorization_code",
 				"client_id":     config.OAuth2.ClientID,
 				"code":          code,
-				"redirect_uri":  config.OAuth2.RedirectURI,
+				"redirect_uri":  actualRedirectURI,
 				"code_verifier": codeVerifier,
 			}
 
@@ -496,16 +570,22 @@ func main() {
 				cache.ExpiresAt = time.Now().Unix() + int64(expiresIn)
 			}
 
-			if err := saveTokenCache(cache); err != nil {
+			if err := saveTokenCache(cache); err != nil && !quietMode {
 				fmt.Printf("Warning: failed to cache token: %v\n", err)
 			}
 
-			// Pretty print the tokens
-			var prettyJSON bytes.Buffer
-			if err := json.Indent(&prettyJSON, body, "", "  "); err != nil {
-				return fmt.Errorf("formatting JSON: %w", err)
+			// Output tokens
+			if quietMode {
+				// JSON output for quiet mode
+				fmt.Println(string(body))
+			} else {
+				// Pretty print the tokens
+				var prettyJSON bytes.Buffer
+				if err := json.Indent(&prettyJSON, body, "", "  "); err != nil {
+					return fmt.Errorf("formatting JSON: %w", err)
+				}
+				fmt.Printf("\nReceived tokens:\n%s\n", prettyJSON.String())
 			}
-			fmt.Printf("\nReceived tokens:\n%s\n", prettyJSON.String())
 
 			return nil
 		},
@@ -514,6 +594,8 @@ func main() {
 	rootCmd.Flags().StringVarP(&configPath, "config", "c", "", "path to config file")
 	rootCmd.Flags().BoolVar(&useClientCredentials, "client-credentials", false, "use client credentials flow instead of PKCE")
 	rootCmd.Flags().BoolVar(&refreshToken, "refresh", false, "force re-authentication even if token is cached")
+	rootCmd.Flags().BoolVarP(&quietMode, "quiet", "q", false, "output only JSON, no informational messages")
+	rootCmd.Flags().IntVarP(&redirectPort, "port", "p", 8000, "port for OAuth callback server (default 8000)")
 
 	versionCmd := &cobra.Command{
 		Use:   "version",
@@ -530,10 +612,10 @@ func main() {
 
 			currentVersion := strings.TrimPrefix(version, "v")
 			if latestVersion == currentVersion {
-				fmt.Println("✓ You're on the latest version")
+				fmt.Println(success("You're on the latest version"))
 			} else if latestVersion > currentVersion {
-				fmt.Printf("⚠️  Update available: v%s → v%s\n", currentVersion, latestVersion)
-				fmt.Println("Run 'idcli upgrade' to update")
+				fmt.Println(warning(fmt.Sprintf("Update available: v%s → v%s", currentVersion, latestVersion)))
+				fmt.Printf("%s\n", colorize(colorGray, "Run 'idcli upgrade' to update"))
 			}
 		},
 	}
@@ -665,7 +747,7 @@ func main() {
 				}
 			}
 
-			fmt.Printf("✓ Successfully upgraded to v%s\n", latestVersion)
+			fmt.Println(success(fmt.Sprintf("Successfully upgraded to v%s", latestVersion)))
 			return nil
 		},
 	}
@@ -680,19 +762,19 @@ func main() {
 				return fmt.Errorf("no cached token found\n\nRun 'idcli' to authenticate first")
 			}
 
-			fmt.Println("Cached token found")
+			fmt.Println(info("Cached token found"))
 			fmt.Printf("Token type: %s\n", cachedToken.TokenType)
 
 			// Check expiration
 			if cachedToken.ExpiresAt == 0 {
-				fmt.Println("Status: ✓ Valid (no expiration)")
+				fmt.Println(success("Valid (no expiration)"))
 			} else if cachedToken.ExpiresAt > time.Now().Unix() {
 				expiresIn := cachedToken.ExpiresAt - time.Now().Unix()
-				fmt.Printf("Status: ✓ Valid (expires in %d seconds / ~%d minutes)\n", expiresIn, expiresIn/60)
+				fmt.Println(success(fmt.Sprintf("Valid (expires in %d seconds / ~%d minutes)", expiresIn, expiresIn/60)))
 			} else {
 				expiredAgo := time.Now().Unix() - cachedToken.ExpiresAt
-				fmt.Printf("Status: ✗ Expired (%d seconds ago / ~%d minutes ago)\n", expiredAgo, expiredAgo/60)
-				fmt.Println("\nRun 'idcli --refresh' to re-authenticate")
+				fmt.Println(colorize(colorYellow, fmt.Sprintf("✗ Expired (%d seconds ago / ~%d minutes ago)", expiredAgo, expiredAgo/60)))
+				fmt.Printf("\n%s\n", colorize(colorGray, "Run 'idcli --refresh' to re-authenticate"))
 				return fmt.Errorf("token expired")
 			}
 
@@ -717,8 +799,117 @@ func main() {
 				}
 				return fmt.Errorf("failed to clear token cache: %w", err)
 			}
-			fmt.Println("✓ Token cache cleared")
+			fmt.Println(success("Token cache cleared"))
 			return nil
+		},
+	}
+
+	configValidateCmd := &cobra.Command{
+		Use:   "config-validate",
+		Short: "Validate the configuration file",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Get config path
+			if configPath == "" {
+				configPath = os.Getenv("IDCLI_CONFIG_YAML_PATH")
+			}
+			if configPath == "" {
+				return fmt.Errorf("config path is required. Please provide it either through --config flag or IDCLI_CONFIG_YAML_PATH environment variable")
+			}
+
+			// Load and validate config
+			config, err := loadConfig(configPath)
+			if err != nil {
+				return fmt.Errorf("✗ Invalid config: %w", err)
+			}
+
+			// Validate required fields
+			var errors []string
+			if config.OAuth2.Issuer == "" {
+				errors = append(errors, "- oauth2.issuer is required")
+			}
+			if config.OAuth2.ClientID == "" {
+				errors = append(errors, "- oauth2.client_id is required")
+			}
+			if config.OAuth2.RedirectURI == "" {
+				errors = append(errors, "- oauth2.redirect_uri is required")
+			}
+			if len(config.OAuth2.Scopes) == 0 {
+				errors = append(errors, "- oauth2.scopes must have at least one scope")
+			}
+
+			if len(errors) > 0 {
+				fmt.Println("✗ Configuration validation failed:")
+				for _, errMsg := range errors {
+					fmt.Println(errMsg)
+				}
+				return fmt.Errorf("configuration validation failed")
+			}
+
+			// All good
+			fmt.Println(success(fmt.Sprintf("Configuration valid (%s)", configPath)))
+			fmt.Printf("\nIssuer: %s\n", config.OAuth2.Issuer)
+			fmt.Printf("Client ID: %s\n", config.OAuth2.ClientID)
+			if config.OAuth2.ClientSecret != "" {
+				fmt.Printf("Client Secret: %s\n", "***configured***")
+			} else {
+				fmt.Printf("Client Secret: %s\n", "(not set)")
+			}
+			fmt.Printf("Redirect URI: %s\n", config.OAuth2.RedirectURI)
+			fmt.Printf("Scopes: %s\n", strings.Join(config.OAuth2.Scopes, ", "))
+
+			return nil
+		},
+	}
+
+	// Add completion command
+	completionCmd := &cobra.Command{
+		Use:   "completion [bash|zsh|fish|powershell]",
+		Short: "Generate shell completion script",
+		Long: `Generate shell completion script for idcli.
+
+To load completions:
+
+Bash:
+  $ source <(idcli completion bash)
+  # To load completions for each session, execute once:
+  # Linux:
+  $ idcli completion bash > /etc/bash_completion.d/idcli
+  # macOS:
+  $ idcli completion bash > $(brew --prefix)/etc/bash_completion.d/idcli
+
+Zsh:
+  # If shell completion is not already enabled in your environment,
+  # you will need to enable it. You can execute the following once:
+  $ echo "autoload -U compinit; compinit" >> ~/.zshrc
+  # To load completions for each session, execute once:
+  $ idcli completion zsh > "${fpath[1]}/_idcli"
+  # You will need to start a new shell for this setup to take effect.
+
+Fish:
+  $ idcli completion fish | source
+  # To load completions for each session, execute once:
+  $ idcli completion fish > ~/.config/fish/completions/idcli.fish
+
+PowerShell:
+  PS> idcli completion powershell | Out-String | Invoke-Expression
+  # To load completions for every new session, run:
+  PS> idcli completion powershell > idcli.ps1
+  # and source this file from your PowerShell profile.
+`,
+		DisableFlagsInUseLine: true,
+		ValidArgs:             []string{"bash", "zsh", "fish", "powershell"},
+		Args:                  cobra.ExactValidArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			switch args[0] {
+			case "bash":
+				rootCmd.GenBashCompletion(os.Stdout)
+			case "zsh":
+				rootCmd.GenZshCompletion(os.Stdout)
+			case "fish":
+				rootCmd.GenFishCompletion(os.Stdout, true)
+			case "powershell":
+				rootCmd.GenPowerShellCompletionWithDesc(os.Stdout)
+			}
 		},
 	}
 
@@ -726,6 +917,8 @@ func main() {
 	rootCmd.AddCommand(upgradeCmd)
 	rootCmd.AddCommand(validateCmd)
 	rootCmd.AddCommand(clearCmd)
+	rootCmd.AddCommand(configValidateCmd)
+	rootCmd.AddCommand(completionCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
