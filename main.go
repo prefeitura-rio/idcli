@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	version = "0.3.5"
+	version = "0.3.6"
 	repoURL = "https://github.com/prefeitura-rio/idcli"
 )
 
@@ -655,8 +655,62 @@ func main() {
 		},
 	}
 
+	validateCmd := &cobra.Command{
+		Use:   "validate",
+		Short: "Validate the cached token",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Load cached token
+			cachedToken, err := loadTokenCache()
+			if err != nil {
+				return fmt.Errorf("no cached token found\n\nRun 'idcli' to authenticate first")
+			}
+
+			fmt.Println("Cached token found")
+			fmt.Printf("Token type: %s\n", cachedToken.TokenType)
+
+			// Check expiration
+			if cachedToken.ExpiresAt == 0 {
+				fmt.Println("Status: ✓ Valid (no expiration)")
+			} else if cachedToken.ExpiresAt > time.Now().Unix() {
+				expiresIn := cachedToken.ExpiresAt - time.Now().Unix()
+				fmt.Printf("Status: ✓ Valid (expires in %d seconds / ~%d minutes)\n", expiresIn, expiresIn/60)
+			} else {
+				expiredAgo := time.Now().Unix() - cachedToken.ExpiresAt
+				fmt.Printf("Status: ✗ Expired (%d seconds ago / ~%d minutes ago)\n", expiredAgo, expiredAgo/60)
+				fmt.Println("\nRun 'idcli --refresh' to re-authenticate")
+				return fmt.Errorf("token expired")
+			}
+
+			// Show token info
+			fmt.Printf("\nAccess Token: %s\n", cachedToken.AccessToken)
+			if cachedToken.RefreshToken != "" {
+				fmt.Printf("Refresh Token: %s\n", cachedToken.RefreshToken)
+			}
+
+			return nil
+		},
+	}
+
+	clearCmd := &cobra.Command{
+		Use:   "clear",
+		Short: "Clear the cached token",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := clearTokenCache(); err != nil {
+				if os.IsNotExist(err) {
+					fmt.Println("No cached token to clear")
+					return nil
+				}
+				return fmt.Errorf("failed to clear token cache: %w", err)
+			}
+			fmt.Println("✓ Token cache cleared")
+			return nil
+		},
+	}
+
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(upgradeCmd)
+	rootCmd.AddCommand(validateCmd)
+	rootCmd.AddCommand(clearCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
